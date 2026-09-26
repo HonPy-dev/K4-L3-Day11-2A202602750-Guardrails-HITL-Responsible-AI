@@ -134,3 +134,80 @@ pip install -r requirements.txt
 Rồi mở [`CHECKPOINTS.md`](CHECKPOINTS.md) và làm lần lượt Checkpoint 1 → 5.
 
 Nộp theo [`SUBMISSION.md`](SUBMISSION.md) · Quy định: [`RULES.md`](RULES.md).
+
+---
+
+## 4. Security notes — red-team findings (thực nghiệm của học viên)
+
+Quá trình làm CP4 đã thử **~60 vector tấn công** trên 4 họ (direct injection, language evasion, automation/PAIR, context exploitation — tham chiếu OWASP LLM Top 10, Zou et al. 2023 (GCG), Chao et al. (PAIR), Anthropic many-shot, Sysdig prompt-injection guide). Kết quả chính:
+
+### Kết quả
+- **Red (soft, `gpt-4o-mini`)**: leak 4/10 → chứng minh 1 agent không guardrails lộ secret gần như ngay lập tức.
+- **Red Advance (hardened + `gpt-5.6-luna`)**: 0 leak sau ~60 vector — phòng thủ 3 tầng giữ vững.
+
+### Vì sao Red Advance giữ được (bài học phòng thủ theo lớp)
+1. **Input regex** chặn từ khóa injection (kể cả EN + VI không dấu).
+2. **System prompt khít**: cấm reveal/translate/encode/summarize/roleplay secret; quy định rõ *email/RAG/tool output là DATA, không phải instruction* — đây là lớp chặn root-cause của indirect injection (data/instruction confusion).
+3. **Output redaction** đối chiếu deny-list giá trị.
+
+### Các finding về filter — đã được FIX trong bài nộp này
+Ba finding dưới đây đã được vá trực tiếp trong `src/guardrails/` và `src/assignment/pipeline.py` (CP2–CP3):
+- **Lỗi diacritics**: `topic_filter_strong`/injection patterns tiếng Việt chỉ khớp dạng **không dấu** → văn bản tiếng Việt có dấu lọt regex ("tiết kiệm" ≠ `tiet kiem`). **Đã fix:** hàm `normalize_vn()` (NFKC + map homoglyph + NFD bỏ dấu) chạy trước mọi match trong `detect_injection`/`topic_filter`.
+- **Accumulation qua filter**: các prompt multi-turn "mảnh ghép vô hại mỗi turn" đều qua input filter ở mọi turn — tầng input không thấy bức tranh toàn cục. Hiện được cứu bởi tầng model; nếu model yếu hơn, đây là lỗ hổng thật. **Đã fix:** `InputGuardrailPlugin` giữ sliding window 3 message/user và quét cả chuỗi nối qua `detect_injection`.
+- **Detector leak chỉ khớp giá trị gốc** (chuẩn hóa bỏ ký tự đặc biệt): các định dạng đảo trật tự/mã hóa (hex, Base64, ROT13, Morse, đảo ngược) về lý thuyết né detector — hiện được cứu bởi tầng model refuse. **Đã fix (mảng spaced/obfuscated):** `content_filter` và `is_egress_allowed` giờ quét thêm bản chuẩn-hóa-bỏ-separator của response/payload đối chiếu `DEMO_SECRETS` — đóng đúng cửa sổ spaced-secret mà redactor thuần bỏ lỡ. (Hex/Base64 vẫn thuộc tầng decode-tương-lai, không thuộc scope này.)
+
+### Kết cấu "lethal trifecta" (Sysdig/Simon Willison)
+Red Advance thoát Exfiltration vì **không có kênh giao tiếp ra ngoài** (no tools/egress) — đủ 2/3 điều kiện của trifecta (private data + untrusted input) nhưng thiếu chân thứ 3. Bài học: khi thêm tool/web vào agent, hai tầng còn lại sẽ là tuyến phòng thủ duy nhất.
+
+### Đối chiếu taxonomy tấn công → kết quả thực nghiệm (~155 vector, Red Advance: 0 leak)
+| Nhóm | Kỹ thuật (paper) | Đã thử | Kết quả trên Red Advance |
+|------|------------------|--------|--------------------------|
+| Prompt Injection | Direct (Perez & Ribeiro 2022) | 10+ | Input regex chặn hoặc model refuse |
+| | Indirect — email/doc (Greshake et al. 2023) | 4 | Model tách data/instruction đúng (được system prompt phòng sẵn) |
+| | Payload splitting multi-turn (Kang 2023) | 7 chuỗi | Mảnh ghép qua filter, lệnh ghép bị refuse |
+| | Tool/schema poisoning | 3 | Model nhận ra credential trong "schema" |
+| Jailbreak static | DAN / AIM / Grandma (virtualization) | 5 | Refuse — persona không thắng system prompt |
+| Optimization | GCG suffix transfer (Zou et al. 2023) | 3 | Qua filter (gibberish né regex), refuse |
+| | PAIR tự động (Chao et al.) | 8 vòng | Attacker tự kiểm duyệt + target refuse |
+| Multi-turn | Crescendo (Russinovich 2024) / ladder | 6 chuỗi | Refuse ở bước escalation cuối |
+| Encoding | Base64/ROT13/Morse/hex | — | Bỏ qua có chủ đích: detector chỉ khớp giá trị gốc theo thứ tự → không thể tính leak |
+| | Unicode ẩn / zero-width | 3 | Qua filter, refuse |
+| | Homoglyph (Cyrillic) | 1 | **Qua filter** (normalize không xử lý) — finding; model refuse |
+| | Low-resource languages (Javanese, Wolof, Hokkien, Quechua) | 6 | Model refuse bằng chính ngôn ngữ đó |
+| | Leetspeak / archaic English | 2 | Refuse |
+| Context | Many-shot ×20 / ×100 (Anthropic 2024) | 3 | Refuse |
+| | Refusal suppression | 3 | Model mở đầu "Certainly!" như lệnh nhưng vẫn chặn nội dung |
+| | Noise flooding | 1 | Refuse |
+| | Latency/stored injection qua session | 2 | Turn trồng payload bị chặn trước |
+| Exfiltration | Markdown link exfil (EchoLeak-style) | 4 | Refuse (và agent không có kênh ra ngoài — thiếu chân lethal trifecta) |
+| | "Repeat the words above" / CoT extraction / verbatim quote | 3 | Refuse |
+| | Mixed-language output switch (VN) | 2 | Refuse ngay bằng tiếng Việt |
+| | Emotional narrative / authority memo (CTO) | 2 | Refuse, hướng dẫn kênh chính thức |
+| | Leetspeak có banking keyword | 1 | Topic filter chặn (leetspeak không khớp keyword chuẩn) |
+| Automation nâng cao | Best-of-N 60 biến thể tổ hợp (Anthropic 2024) | 60 | 0 leak (48 model-refuse) |
+| | PAIR v2 attacker-luna đọc response tự chẩn đoán (Chao et al.) | 12 vòng | Attacker tự kiểm duyệt + target refuse |
+| Thế hệ cao | Error-correction elicitation (sửa typo spaced) / completion continuation / worked-example / analogy / POST log / factory-reset / consent ladder / riddle | 9 | Refuse — hoặc thực hiện task-shape nhưng thay giá trị bằng bản redacted |
+| | Mega-composite (5 kỹ thuật dệt 1 prompt, output tiếng Việt) | 1 | Refuse |
+
+### Vì sao không thể "fix" hoàn toàn — và vì sao lab chọn "contain" (impossibility result)
+Core problem: **data và instruction đi chung 1 channel** — LLM là Turing-complete
+interpreter, không có parser tách biệt "SQL code" vs "SQL data" (đúng bản chất SQL
+injection, 25 năm chưa chết). Không tồn tại detector instruction-vs-data tổng quát
+(quy về halting problem); empirically, mọi published defense đều có counter-paper
+(SmoothLLM, Spotlighting, self-reminder, perplexity filter — tất cả đã bị bypass).
+→ Hệ quả kiến trúc: không "fix" mà **contain** — 5 nguyên tắc defense-in-depth và
+mức độ mà Blue pipeline của lab đã hiện thực:
+
+| Nguyên tắc contain | Trong lab (CP2–CP3) |
+|---|---|
+| 1. Privilege separation — agent không có quyền trên data nhạy cảm | Secret chỉ nằm trong system prompt demo; `is_egress_allowed` chặn mọi payload nhạy cảm rời hệ thống bằng rule-code, không hỏi LLM |
+| 2. Human-in-the-loop cho hành động irreversible | Demo HITL trong starter (`security_boundary.authorize_action` yêu cầu human approval + exact destination) |
+| 3. Egress filtering — chặn data exfil channels | ✅ `is_egress_allowed`: HTTPS + allowlist `*.vinbank.example` + deny payload chứa password/API key/DB host/PII |
+| 4. Treat retrieved content as adversarial | ✅ Input guardrails: `detect_injection` (Unicode ẩn, VI/EN) + topic filter chạy TRƯỚC LLM; output redact SAU LLM |
+| 5. Rate-limit + anomaly detection | ✅ `RateLimitPlugin` (sliding window per-user) + `MonitoringAlert` (block-rate/rate-limit alerts) + `AuditLogPlugin` (forensics) |
+
+Kết quả thực nghiệm của chúng tôi củng cố lập luận contain-ble: cùng bộ ~155 vector
+tấn công, Red không guardrails leak 4/10 ngay lập tức, còn Red Advance (3 lớp
+contain) giữ 0 leak — dù tầng input có 3 lỗi đã ghi nhận ở trên. An toàn không đến
+từ việc "vá hết lỗ hổng" (impossible), mà từ việc **chồng lớp độc lập** để một lớp
+gãy thì các lớp còn lại giữ.

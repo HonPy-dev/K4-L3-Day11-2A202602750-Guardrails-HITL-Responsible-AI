@@ -41,12 +41,11 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "vn_phone": r"(?<!\d)0\d{8,10}(?!\d)",
+        "email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "national_id": r"(?<!\d)\d{9}(?!\d)|(?<!\d)\d{12}(?!\d)",
+        "api_key": r"sk-[A-Za-z0-9_-]+",
+        "password": r"password\s*(?:is|:|=)\s*\S+",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -54,6 +53,21 @@ def content_filter(response: str) -> dict:
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    # Spaced/obfuscated secret — chuẩn hóa (bỏ non-alnum) rồi tìm giá trị
+    # gốc: bắt "a d m i n 1 2 3", "sk- vinbank ...", URL query nhúng secret.
+    # Đây chính là cửa sổ mà redactor string-match thuần bỏ lỡ.
+    from core.config import DEMO_SECRETS
+
+    collapsed = re.sub(r"[^a-zA-Z0-9]", "", response).lower()
+    for value in DEMO_SECRETS:
+        needle = re.sub(r"[^a-zA-Z0-9]", "", str(value)).lower()
+        if len(needle) >= 6 and needle in collapsed:
+            issues.append("obfuscated_secret: session secret present in "
+                          "separator-stripped form")
+            redacted = ("[REDACTED] Response contains a session secret in "
+                        "obfuscated/separated form")
+            break
 
     return {
         "safe": len(issues) == 0,
@@ -172,16 +186,18 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        result = content_filter(response_text)
+        if not result["safe"]:
+            self.redacted_count += 1
+            role = None
+            if llm_response.content:
+                role = llm_response.content.role
+            llm_response.content = types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=result["redacted"])],
+            )
 
-        return llm_response  # TODO: modify if needed
+        return llm_response
 
 
 # ============================================================

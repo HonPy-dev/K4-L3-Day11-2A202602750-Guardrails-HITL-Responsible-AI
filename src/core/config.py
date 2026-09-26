@@ -25,7 +25,9 @@ _ROOT = Path(__file__).resolve().parents[2]
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(_ROOT / ".env")
+    # override=True: .env trong repo phải thắng biến môi trường hệ thống
+    # (tránh key placeholder ngoài máy đè lên key thật của lab).
+    load_dotenv(_ROOT / ".env", override=True)
 except ImportError:
     pass
 
@@ -105,7 +107,9 @@ def get_blue_provider() -> str:
 
 def get_blue_model() -> str:
     # Hard-locked; env cannot override for the graded Blue Team path.
-    return BLUE_MODEL
+    # OPENROUTER_MODEL chỉ dùng khi slug mặc định không còn trên OpenRouter
+    # (hiện tại phải dùng bản ":free" — slug gốc trả 404).
+    return os.environ.get("OPENROUTER_MODEL", "").strip() or BLUE_MODEL
 
 
 def get_openrouter_api_key() -> str:

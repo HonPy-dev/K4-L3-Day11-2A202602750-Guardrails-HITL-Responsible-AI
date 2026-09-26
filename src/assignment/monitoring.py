@@ -10,7 +10,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 def default_metrics_path() -> str:
     """Always resolve to <repo>/outputs/… (safe when cwd is src/)."""
     repo_root = Path(__file__).resolve().parents[2]
@@ -42,16 +41,56 @@ class MonitoringAlert:
     judge_fails: int = 0
 
     def check_metrics(self) -> list[Alert]:
-        """TODO: compute rates, append Alert objects when thresholds exceeded."""
-        raise NotImplementedError("Implement MonitoringAlert.check_metrics")
+        """Compute rates, append Alert objects when thresholds exceeded."""
+        if self.total_requests:
+            block_rate = self.blocked_requests / self.total_requests
+            if block_rate > self.block_rate_threshold:
+                self.alerts.append(
+                    Alert(
+                        metric="block_rate",
+                        value=round(block_rate, 3),
+                        threshold=self.block_rate_threshold,
+                        message=(
+                            f"Block rate {block_rate:.1%} vượt ngưỡng "
+                            f"{self.block_rate_threshold:.0%} — nghi ngờ bị tấn công."
+                        ),
+                    )
+                )
+        if self.rate_limit_hits >= self.rate_limit_hit_threshold:
+            self.alerts.append(
+                Alert(
+                    metric="rate_limit_hits",
+                    value=self.rate_limit_hits,
+                    threshold=self.rate_limit_hit_threshold,
+                    message=(
+                        f"{self.rate_limit_hits} request bị rate-limit "
+                        f"(>= {self.rate_limit_hit_threshold}) — có thể là flooding."
+                    ),
+                )
+            )
+        if self.judge_checks:
+            judge_fail_rate = self.judge_fails / self.judge_checks
+            if judge_fail_rate > self.judge_fail_rate_threshold:
+                self.alerts.append(
+                    Alert(
+                        metric="judge_fail_rate",
+                        value=round(judge_fail_rate, 3),
+                        threshold=self.judge_fail_rate_threshold,
+                        message=f"Judge fail rate {judge_fail_rate:.1%} vượt ngưỡng.",
+                    )
+                )
+        return self.alerts
 
     def export_json(self, filepath: str | None = None):
-        """TODO: write metrics + alerts to JSON under repo-root ``outputs/`` by default.
-        Use ``filepath or default_metrics_path()`` so running from ``src/`` does not
-        create ``src/outputs/``.
-        """
-        _ = filepath or default_metrics_path()
-        raise NotImplementedError("Implement MonitoringAlert.export_json")
+        """Write metrics + alerts to JSON under repo-root ``outputs/`` by default."""
+        self.check_metrics()
+        path = Path(filepath or default_metrics_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.snapshot(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return str(path)
 
     def snapshot(self) -> dict:
         block_rate = (
